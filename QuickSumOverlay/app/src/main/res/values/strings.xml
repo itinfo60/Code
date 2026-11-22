@@ -1,0 +1,4 @@
+<resources>
+<string name="app_name">QuickSum Floating</string>
+<string name="accessibility_description">User-consented floating calculator. When PhonePe exposes its amount-entry field, reads and edits only that field to show a running result. Does not access payment PINs or make payments.</string>
+</resources>
