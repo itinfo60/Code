@@ -1,4 +1,4 @@
 <resources>
-<string name="app_name">QuickSum Overlay</string>
-<string name="accessibility_description">On PhonePe amount entry only: reads and edits an accessible amount when you tap + or =. Does not read PINs, send data or automate payment.</string>
+<string name="app_name">QuickSum Floating</string>
+<string name="accessibility_description">User-consented floating calculator. When PhonePe exposes its amount-entry field, reads and edits only that field to show a running result. Does not access payment PINs or make payments.</string>
 </resources>
