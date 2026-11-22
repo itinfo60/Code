@@ -298,7 +298,7 @@ class QuickSumService : AccessibilityService() {
         }
         scroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
-            fillViewport = true
+            isFillViewport = true
             background = bg(bgColor, 12)
         }
         expression = TextView(this).apply {
