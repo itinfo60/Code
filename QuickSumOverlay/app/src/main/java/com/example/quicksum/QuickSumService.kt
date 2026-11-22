@@ -164,7 +164,7 @@ class QuickSumService : AccessibilityService() {
     private fun canWrite(field: AccessibilityNodeInfo, amount: String): Boolean {
         if (field.packageName?.toString() != target || !field.isEditable || field.isPassword) return false
         if (field.actionList.none { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT }) return false
-        if (!Regex("\\d{1,9}(\\.\\d{0,2})?").matches(amount)) return false
+        if (amount.isNotEmpty() && !Regex("\\d{1,9}(\\.\\d{0,2})?").matches(amount)) return false
         return true
     }
     private fun write(field: AccessibilityNodeInfo, value: String): Boolean {
