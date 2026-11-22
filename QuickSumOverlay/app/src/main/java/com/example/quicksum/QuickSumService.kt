@@ -2,6 +2,7 @@ package com.example.quicksum
 
 import android.accessibilityservice.AccessibilityService
 import android.graphics.Color
+import android.graphics.Rect
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
@@ -341,16 +342,34 @@ class QuickSumService : AccessibilityService() {
             background = bg(bgColor, 12)
         }
         expression = TextView(this).apply {
-            textSize = 18f
+            textSize = 17f
             setTextColor(Color.rgb(242, 243, 246))
             isSingleLine = true
             ellipsize = null
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(12), 0, dp(12), 0)
         }
-        scroll!!.addView(expression)
-        root.addView(scroll, LinearLayout.LayoutParams(-1, dp(53)).apply {
-            bottomMargin = dp(12)
+        scroll!!.addView(expression, HorizontalScrollView.LayoutParams(
+            HorizontalScrollView.LayoutParams.WRAP_CONTENT,
+            HorizontalScrollView.LayoutParams.MATCH_PARENT
+        ))
+        // The grip is a separate touch target, leaving the expression free to scroll.
+        val expressionRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = bg(bgColor, 12)
+        }
+        val grip = TextView(this).apply {
+            text = "⋮⋮"
+            textSize = 18f
+            setTextColor(Color.rgb(145, 149, 162))
+            gravity = Gravity.CENTER
+            contentDescription = "Drag QuickSum panel"
+        }
+        expressionRow.addView(grip, LinearLayout.LayoutParams(dp(34), dp(48)))
+        expressionRow.addView(scroll, LinearLayout.LayoutParams(0, dp(48), 1f))
+        root.addView(expressionRow, LinearLayout.LayoutParams(-1, dp(48)).apply {
+            bottomMargin = dp(8)
         })
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         fun makeButton(s: String, color: Int, fn: () -> Unit) {
@@ -387,12 +406,22 @@ class QuickSumService : AccessibilityService() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            y = dp(190)
+            // Keep the overlay below the amount box, rather than covering the text cursor.
+            // The exposed bounds are screen coordinates, which include the status bar.
+            val bounds = Rect()
+            field()?.getBoundsInScreen(bounds)
+            val statusBar = resources.getIdentifier("status_bar_height", "dimen", "android")
+                .takeIf { it != 0 }?.let { resources.getDimensionPixelSize(it) } ?: 0
+            val preferred = if (bounds.bottom > 0) bounds.bottom - statusBar + dp(24)
+                            else (resources.displayMetrics.heightPixels * 0.38f).toInt()
+            val minY = (resources.displayMetrics.heightPixels * 0.30f).toInt()
+            val maxY = (resources.displayMetrics.heightPixels * 0.54f).toInt()
+            y = preferred.coerceIn(minY, maxY)
         }
-        // Drag the expression strip (not the buttons) to reposition the panel.
+        // Drag via the small grip; horizontal swipes on expression history now scroll it.
         var startY = 0
         var touchedY = 0f
-        expression!!.setOnTouchListener(object : View.OnTouchListener {
+        grip.setOnTouchListener(object : View.OnTouchListener {
             override fun onTouch(v: View?, ev: MotionEvent): Boolean {
                 when (ev.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
