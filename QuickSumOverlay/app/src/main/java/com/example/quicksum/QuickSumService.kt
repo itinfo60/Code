@@ -5,6 +5,9 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -36,6 +39,13 @@ class QuickSumService : AccessibilityService() {
     private val tokens = mutableListOf<String>() // alternating committed operands/operators
     private var entry = ""
     private var lastWritten: String? = null
+    private var entryAtWrite = ""
+    private var lastObserved = ""
+    private var lastWriteTime = 0L
+    private val handler = Handler(Looper.getMainLooper())
+    private var pendingSync: Runnable? = null
+    private var inputGeneration = 0L
+    private val typingQuietMs = 360L
     private var programmaticUpdate = false
     private var paymentFieldSeen = false
     private var actionRunning = false
@@ -46,16 +56,15 @@ class QuickSumService : AccessibilityService() {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
     }
     override fun onInterrupt() { hide() }
-    override fun onDestroy() { hide(); super.onDestroy() }
+    override fun onDestroy() { cancelSync(); hide(); super.onDestroy() }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null) return
-        // Gboard and accessibility-overlay windows generate events too. Ignore them;
-        // hiding/resetting here makes buttons appear to miss taps intermittently.
-        if (event.packageName?.toString() != target) return
-        val field = field()
-        if (field == null) {
-            // Only dismiss on target-app window transitions, not transient text updates.
+        if (event == null || event.packageName?.toString() != target) return
+        if (event.eventType != AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED &&
+            event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            event.eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED) return
+        val f = field()
+        if (f == null) {
             if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
                 hide()
                 paymentFieldSeen = false
@@ -65,11 +74,11 @@ class QuickSumService : AccessibilityService() {
         }
         paymentFieldSeen = true
         if (overlay == null) show()
-        // Ignore the text event created by our own ACTION_SET_TEXT.
         if (event.eventType != AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED || programmaticUpdate) return
-        val raw = clean(field.text?.toString() ?: "") ?: return
-        if (raw == lastWritten) return
-        acceptExternalChange(raw, field)
+        if (event.eventTime < lastWriteTime) return
+        val raw = clean(f.text?.toString() ?: "") ?: return
+        if (raw == lastObserved) return
+        acceptExternalChange(raw)
     }
 
     private fun seek(node: AccessibilityNodeInfo, phrase: String, depth: Int = 0): Boolean {
@@ -174,66 +183,87 @@ class QuickSumService : AccessibilityService() {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value)
         }
         programmaticUpdate = true
-        val ok = try { field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundle) }
-                 catch (_: Exception) { false }
+        val ok = try {
+            field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundle)
+        } catch (_: Exception) { false }
         programmaticUpdate = false
-        if (ok) lastWritten = value
+        if (ok) {
+            lastWritten = value
+            entryAtWrite = entry
+            lastObserved = value
+            lastWriteTime = SystemClock.uptimeMillis()
+            val selection = Bundle().apply {
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, value.length)
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, value.length)
+            }
+            try { field.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selection) }
+            catch (_: Exception) { }
+        }
         return ok
     }
     private fun notifyUser(message: String) {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
+    private fun cancelSync() {
+        pendingSync?.let(handler::removeCallbacks)
+        pendingSync = null
+        inputGeneration++
+    }
+    private fun queueSync() {
+        cancelSync()
+        val generation = inputGeneration
+        val expectedRaw = lastObserved
+        val task = Runnable {
+            pendingSync = null
+            if (generation != inputGeneration) return@Runnable
+            val f = field() ?: return@Runnable
+            if (clean(f.text?.toString() ?: "") != expectedRaw) return@Runnable
+            sync(f)
+        }
+        pendingSync = task
+        handler.postDelayed(task, typingQuietMs)
+    }
     private fun sync(field: AccessibilityNodeInfo? = field()) {
         redraw()
         val total = calculate() ?: return
-        // An amount field generally accepts only positive values. Do not write negative or zero.
         val numeric = total.toBigDecimalOrNull() ?: return
         if (numeric <= BigDecimal.ZERO || numeric > BigDecimal("999999999")) return
         if (field == null || !write(field, total)) notifyUser("PhonePe did not allow changing the amount")
     }
-
-    /**
-     * When the field shows our rendered total, Gboard may append or replace digits.
-     * We recover the newly typed digits only when the change is unambiguous.
-     * Ambiguous edits are rejected instead of guessing a payment amount.
-     */
-    private fun acceptExternalChange(raw: String, field: AccessibilityNodeInfo) {
-        val prior = lastWritten
+    // Use full observed suffix since the last calculated write so rapid digits aren't lost.
+    // Treat an end-character removal as one Gboard backspace on the expression.
+    private fun acceptExternalChange(raw: String) {
+        val previous = lastObserved
+        val base = lastWritten
+        lastObserved = raw
         if (tokens.isEmpty()) {
-            if (validOperand(raw)) {
-                entry = raw
-                lastWritten = null
+            entry = raw
+            redraw()
+            return
+        }
+        if (previous.isNotEmpty() && raw == previous.dropLast(1)) {
+            eraseExpressionDigit()
+            return
+        }
+        if (base != null && raw.startsWith(base) && raw.length > base.length) {
+            val candidate = entryAtWrite + raw.substring(base.length)
+            if (validOperand(candidate)) {
+                entry = candidate
                 redraw()
-            } else if (raw.isEmpty()) {
-                entry = ""
-                redraw()
+                queueSync()
             }
             return
         }
-        if (prior == null) return
-        // Gboard's own delete key removes a character from the displayed amount.
-        // Translate that explicit one-character deletion into an expression edit.
-        if (raw == prior.dropLast(1) && raw.length < prior.length) {
-            eraseExpressionDigit(field)
-            return
-        }
-        if (raw.startsWith(prior) && raw.length > prior.length) {
-            val delta = raw.substring(prior.length)
-            if (!Regex("\\d{1,9}(\\.\\d{0,2})?").matches(delta)) return
-            entry += delta
-            sync(field)
-            return
-        }
-        // Sometimes the IME replaces the entire field with the next operand.
-        if (validOperand(raw) && raw != prior && entry.isEmpty()) {
+        if (validOperand(raw)) {
             entry = raw
-            sync(field)
-            return
+            redraw()
+            queueSync()
+        } else if (raw.isEmpty()) {
+            eraseExpressionDigit()
         }
-        // Never guess when edits to the computed total are ambiguous.
-        if (raw != prior) notifyUser("Use C to restart after editing the result")
     }
     private fun op(symbol: String) {
+        cancelSync()
         val f = field() ?: return notifyUser("PhonePe amount field unavailable")
         if (tokens.isEmpty()) {
             val number = if (entry.isNotEmpty()) entry else clean(f.text?.toString() ?: "")
@@ -253,7 +283,8 @@ class QuickSumService : AccessibilityService() {
         }
         sync(f)
     }
-    private fun eraseExpressionDigit(f: AccessibilityNodeInfo) {
+    private fun eraseExpressionDigit() {
+        cancelSync()
         when {
             entry.isNotEmpty() -> entry = entry.dropLast(1)
             tokens.lastOrNull()?.let(::isOperator) == true -> {
@@ -262,21 +293,27 @@ class QuickSumService : AccessibilityService() {
             }
             tokens.isNotEmpty() -> entry = tokens.removeAt(tokens.lastIndex).dropLast(1)
         }
+        redraw()
         if (tokens.isEmpty() && entry.isEmpty()) {
+            val f = field()
             reset()
-            write(f, "")
-            redraw()
-        } else sync(f)
+            f?.let { write(it, "") }
+        } else queueSync()
     }
     private fun clearAll() {
+        cancelSync()
         reset()
         field()?.let { write(it, "") }
         redraw()
     }
     private fun reset() {
+        cancelSync()
         tokens.clear()
         entry = ""
         lastWritten = null
+        entryAtWrite = ""
+        lastObserved = ""
+        lastWriteTime = 0L
         latestError = null
     }
     private fun redraw() {
