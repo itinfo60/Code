@@ -39,7 +39,6 @@ class QuickSumService : AccessibilityService() {
     private var programmaticUpdate = false
     private var paymentFieldSeen = false
     private var actionRunning = false
-    private var lastActionAt = 0L
     private var latestError: String? = null
 
     override fun onServiceConnected() {
@@ -328,10 +327,8 @@ class QuickSumService : AccessibilityService() {
                 isFocusable = false
                 setOnClickListener {
                     // Serialize taps; never enqueue overlapping edits while PhonePe updates.
-                    val now = android.os.SystemClock.uptimeMillis()
-                    if (actionRunning || now - lastActionAt < 110L) return@setOnClickListener
+                    if (actionRunning) return@setOnClickListener
                     actionRunning = true
-                    lastActionAt = now
                     try { fn() } finally { actionRunning = false }
                 }
             }
