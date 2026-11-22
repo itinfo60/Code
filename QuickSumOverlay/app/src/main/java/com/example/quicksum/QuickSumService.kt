@@ -5,7 +5,6 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
-import android.text.TextUtils
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -39,6 +38,8 @@ class QuickSumService : AccessibilityService() {
     private var lastWritten: String? = null
     private var programmaticUpdate = false
     private var paymentFieldSeen = false
+    private var actionRunning = false
+    private var lastActionAt = 0L
     private var latestError: String? = null
 
     override fun onServiceConnected() {
@@ -50,16 +51,17 @@ class QuickSumService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
-        if (event.packageName?.toString() != target) {
-            hide()
-            if (paymentFieldSeen) reset()
-            paymentFieldSeen = false
-            return
-        }
+        // Gboard and accessibility-overlay windows generate events too. Ignore them;
+        // hiding/resetting here makes buttons appear to miss taps intermittently.
+        if (event.packageName?.toString() != target) return
         val field = field()
         if (field == null) {
-            hide()
-            paymentFieldSeen = false
+            // Only dismiss on target-app window transitions, not transient text updates.
+            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                hide()
+                paymentFieldSeen = false
+                reset()
+            }
             return
         }
         paymentFieldSeen = true
@@ -210,6 +212,12 @@ class QuickSumService : AccessibilityService() {
             return
         }
         if (prior == null) return
+        // Gboard's own delete key removes a character from the displayed amount.
+        // Translate that explicit one-character deletion into an expression edit.
+        if (raw == prior.dropLast(1) && raw.length < prior.length) {
+            eraseExpressionDigit(field)
+            return
+        }
         if (raw.startsWith(prior) && raw.length > prior.length) {
             val delta = raw.substring(prior.length)
             if (!Regex("\\d{1,9}(\\.\\d{0,2})?").matches(delta)) return
@@ -246,22 +254,17 @@ class QuickSumService : AccessibilityService() {
         }
         sync(f)
     }
-    private fun backspace() {
-        val f = field() ?: return
+    private fun eraseExpressionDigit(f: AccessibilityNodeInfo) {
         when {
             entry.isNotEmpty() -> entry = entry.dropLast(1)
-            tokens.isNotEmpty() && isOperator(tokens.last()) -> tokens.removeAt(tokens.lastIndex)
-            tokens.isNotEmpty() -> {
-                val last = tokens.removeAt(tokens.lastIndex)
-                entry = last.dropLast(1)
+            tokens.lastOrNull()?.let(::isOperator) == true -> {
+                tokens.removeAt(tokens.lastIndex)
+                if (tokens.isNotEmpty()) entry = tokens.removeAt(tokens.lastIndex).dropLast(1)
             }
-            else -> {
-                val value = clean(f.text?.toString() ?: "") ?: return
-                entry = value.dropLast(1)
-            }
+            tokens.isNotEmpty() -> entry = tokens.removeAt(tokens.lastIndex).dropLast(1)
         }
         if (tokens.isEmpty() && entry.isEmpty()) {
-            lastWritten = null
+            reset()
             write(f, "")
             redraw()
         } else sync(f)
@@ -317,18 +320,26 @@ class QuickSumService : AccessibilityService() {
         fun makeButton(s: String, color: Int, fn: () -> Unit) {
             val btn = TextView(this).apply {
                 text = s
-                textSize = 21f
+                textSize = 23f
                 setTextColor(color)
                 gravity = Gravity.CENTER
                 background = bg(Color.rgb(43, 45, 52), 15)
-                setOnClickListener { fn() }
+                isClickable = true
+                isFocusable = false
+                setOnClickListener {
+                    // Serialize taps; never enqueue overlapping edits while PhonePe updates.
+                    val now = android.os.SystemClock.uptimeMillis()
+                    if (actionRunning || now - lastActionAt < 110L) return@setOnClickListener
+                    actionRunning = true
+                    lastActionAt = now
+                    try { fn() } finally { actionRunning = false }
+                }
             }
             row.addView(btn, LinearLayout.LayoutParams(0, dp(55), 1f).apply {
                 marginStart = dp(2); marginEnd = dp(2)
             })
         }
         makeButton("C", Color.rgb(234, 119, 122)) { clearAll() }
-        makeButton("⌫", Color.rgb(242, 152, 152)) { backspace() }
         makeButton("÷", Color.WHITE) { op("÷") }
         makeButton("×", Color.WHITE) { op("×") }
         makeButton("−", Color.WHITE) { op("−") }
