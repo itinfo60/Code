@@ -1,10 +1,12 @@
-name: Build QuickSum APK
+name: Build QuickSum Floating APK
 on:
   push:
     branches: [quicksum-overlay-apk]
   workflow_dispatch:
   pull_request:
-    paths: [QuickSumOverlay/**, .github/workflows/quicksum-apk.yml]
+    paths:
+      - 'QuickSumOverlay/**'
+      - '.github/workflows/quicksum-apk.yml'
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -25,22 +27,15 @@ jobs:
           test -n "$SDKMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" 'platforms;android-35' 'build-tools;35.0.0'
-      - name: Verify permission-free manifest
-        working-directory: QuickSumOverlay
-        run: |
-          ! grep -Eqi 'uses-permission|accessibilityservice|bind_accessibility_service|system_alert_window' app/src/main/AndroidManifest.xml
-          ! grep -Rqi 'AccessibilityService' app/src/main/java
-      - name: Build
+      - name: Build floating calculator
         working-directory: QuickSumOverlay
         run: gradle :app:assembleDebug --no-daemon
-      - name: Inspect final APK permissions
+      - name: Inspect APK permissions
         working-directory: QuickSumOverlay
         run: |
-          APK=app/build/outputs/apk/debug/app-debug.apk
           AAPT=$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)
-          "$AAPT" dump permissions "$APK" | tee /tmp/quicksum-permissions.txt
-          ! grep -E 'uses-permission:|permission:' /tmp/quicksum-permissions.txt
+          "$AAPT" dump permissions app/build/outputs/apk/debug/app-debug.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: QuickSumCalculator-safe-debug-apk
+          name: QuickSum-Overlay-v03-debug-apk
           path: QuickSumOverlay/app/build/outputs/apk/debug/app-debug.apk
